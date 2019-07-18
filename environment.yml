@@ -1,0 +1,15 @@
+name: ogusa-dev
+channels:
+- PSLmodels
+dependencies:
+- python
+- setuptools
+- mkl
+- scipy>=0.18.1
+- matplotlib
+- taxcalc>=2.4.0
+- pytest
+- pytest-pep8
+- pytest-xdist
+- dask>=0.20.0
+- bokeh
