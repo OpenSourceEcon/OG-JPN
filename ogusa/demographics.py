@@ -22,21 +22,46 @@ from ogusa import utils
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MultipleLocator
 
+try:
+    cur_path = os.path.split(os.path.abspath(__file__))[0]
+except:
+    print('Current path defined manually')
+    cur_path = '/Users/adamalexanderoppenheimer/Desktop/OG-JPN/ogusa/'
+os.chdir(cur_path)
+datadir = 'data/demographic/'
+fert_dir = datadir + 'jpn_fertility.csv'
+mort_dir = datadir + 'jpn_mortality.csv'
+pop_dir = datadir + 'jpn_population.csv'
+
 '''
 ------------------------------------------------------------------------
 Define functions
 ------------------------------------------------------------------------
 '''
 
+def select_pop_data(pop):
+        new_pop = pop[pop["Age"] != "110+"].astype(int)
+        new_pop = new_pop[new_pop["Year"] == 2014]
+        return new_pop
+
+def select_fert_data(fert, set_zeroes=False):
+    new_fert = fert[fert['AgeDef'] == 'ARDY']
+    new_fert = new_fert[new_fert['Collection'] == 'HFD']
+    new_fert = new_fert[(new_fert['RefCode'] == 'JPN_11')]
+    new_fert.drop(['AgeDef', 'Collection', 'RefCode'], axis=1, inplace=True)
+    new_fert.columns = ['Year', 'Age', 'Values']
+    if set_zeroes:
+        new_fert['Values'][new_fert['Age'] == 14] = 0
+        new_fert['Values'][new_fert['Age'] == 15] = 0
+        new_fert['Values'][new_fert['Age'] == 49] = 0
+        new_fert['Values'][new_fert['Age'] == 50] = 0
+    return new_fert.astype(float)
 
 def get_fert(totpers, min_yr, max_yr, graph=False):
     '''
     --------------------------------------------------------------------
     This function generates a vector of fertility rates by model period
     age that corresponds to the fertility rate data by age in years
-    (Source: National Vital Statistics Reports, Volume 64, Number 1,
-    January 15, 2015, Table 3, final 2013 data
-    http://www.cdc.gov/nchs/data/nvsr/nvsr64/nvsr64_01.pdf)
     --------------------------------------------------------------------
     INPUTS:
     totpers = integer >= 3, total number of agent life periods (E+S)
@@ -105,37 +130,58 @@ def get_fert(totpers, min_yr, max_yr, graph=False):
     RETURNS: fert_rates
     --------------------------------------------------------------------
     '''
-    # Get current population data (2013) for weighting
-    cur_path = os.path.split(os.path.abspath(__file__))[0]
-    pop_file = utils.read_file(cur_path,
-                               "data/demographic/pop_data.csv")
-    pop_data = pd.read_csv(pop_file, sep=',', thousands=',')
+    # Get current population data for weighting
+    pop_file = utils.read_file(cur_path, pop_dir)
+    pop_data = pd.read_csv(pop_file, sep=r'\s+', usecols=['Year', 'Age', 'Total'])
+    pop_data = select_pop_data(pop_data)
     pop_data_samp = pop_data[(pop_data['Age'] >= min_yr - 1) &
                              (pop_data['Age'] <= max_yr - 1)]
-    curr_pop = np.array(pop_data_samp['2013'], dtype='f')
-    curr_pop_pct = curr_pop / curr_pop.sum()
+    curr_pop = np.array(pop_data_samp[pop_data_samp['Year'] == 2014]['Total'], dtype='f')
+    curr_pop_pct = curr_pop / curr_pop.sum() # pct population of that age group within same year
+
     # Get fertility rate by age-bin data
-    fert_data = (np.array([0.0, 0.0, 0.3, 12.3, 47.1, 80.7, 105.5, 98.0,
-                           49.3, 10.4, 0.8, 0.0, 0.0]) / 2000)
-    age_midp = np.array([9, 10, 12, 16, 18.5, 22, 27, 32, 37, 42, 47,
-                         55, 56])
+    fert_data = pd.read_csv(fert_dir, sep=',\s*',\
+        usecols=['Year1', 'Age', 'ASFR', 'AgeDef',\
+                        'Collection', 'RefCode'])
+    fert_data = select_fert_data(fert_data)
+    fert_list = []
+    for i in range(14, 51):
+        age = fert_data[fert_data['Age'] == i]
+        data = age[age['Year'].isin(range(1990, 2015))]
+        fert_list.append(data['Values'].mean())
+    fert_data = fert_data[fert_data['Year'] == 1995]
+    fert_data['Values'] = fert_list
+    fert_data['Values'] = fert_data['Values'] / 2
+
     # Generate interpolation functions for fertility rates
-    fert_func = si.interp1d(age_midp, fert_data, kind='cubic')
+    fert_func = si.splrep(fert_data['Age'], fert_data['Values'])
+    
+    #### AGE BIN CREATION
     # Calculate average fertility rate in each age bin using trapezoid
     # method with a large number of points in each bin.
-    binsize = (max_yr - min_yr + 1) / totpers
+    binsize = (max_yr - min_yr + 1) / totpers  # creating different generations (I believe?)
+
     num_sub_bins = float(10000)
     len_subbins = (np.float64(100 * num_sub_bins)) / totpers
-    age_sub = (np.linspace(np.float64(binsize) / num_sub_bins,
-                           np.float64(max_yr),
-                           int(num_sub_bins*max_yr)) - 0.5 *
+    # 100 (lifetime year) / totpers gives us size of bins. To get length of subbin shouldnt we dividing by num_sub_bins ????
+    age_sub = (np.linspace(np.float64(binsize) / num_sub_bins, # gives us the first subbin (len subbin)
+                           np.float64(max_yr), # gives us end point
+                           int(num_sub_bins*max_yr)) - 0.5 *  #
                np.float64(binsize) / num_sub_bins)
-    curr_pop_sub = np.repeat(np.float64(curr_pop_pct) / num_sub_bins,
-                             num_sub_bins)
+    # gives us mid age of all subbins
+
+    ### POPULATION CREATION
+    ages = np.linspace(min_yr, max_yr, curr_pop_pct.shape[0])
+    pop_func = si.splrep(ages, curr_pop_pct)
+    new_bins = np.linspace(min_yr, max_yr,\
+                            num_sub_bins * max_yr)
+    curr_pop_sub = si.splev(new_bins, pop_func)
+    curr_pop_sub = curr_pop_sub / curr_pop_sub.sum()
     fert_rates_sub = np.zeros(curr_pop_sub.shape)
-    pred_ind = (age_sub > age_midp[0]) * (age_sub < age_midp[-1])
-    age_pred = age_sub[pred_ind]
-    fert_rates_sub[pred_ind] = np.float64(fert_func(age_pred))
+    pred_ind = (age_sub > fert_data['Age'].iloc[0]) * (age_sub < fert_data['Age'].iloc[-1])  # makes sure it is inside valid range
+    age_pred = age_sub[pred_ind]  #gets age_sub in the valid range by applying pred_ind
+    fert_rates_sub[pred_ind] = np.float64(si.splev(age_pred, fert_func))
+    fert_rates_sub[fert_rates_sub < 0] = 0
     fert_rates = np.zeros(totpers)
     end_sub_bin = 0
     for i in range(totpers):
@@ -145,6 +191,7 @@ def get_fert(totpers, min_yr, max_yr, graph=False):
             curr_pop_sub[beg_sub_bin:end_sub_bin] *
             fert_rates_sub[beg_sub_bin:end_sub_bin]).sum() /
             curr_pop_sub[beg_sub_bin:end_sub_bin].sum())
+    fert_rates = np.nan_to_num(fert_rates)
 
     if graph:
         '''
@@ -194,15 +241,15 @@ def get_fert(totpers, min_yr, max_yr, graph=False):
                   1.15 * (fert_fine_pred.max())))
         plt.legend(loc='upper right')
         plt.text(-5, -0.018,
-                 "Source: National Vital Statistics Reports, " +
-                 "Volume 64, Number 1, January 15, 2015.", fontsize=9)
+                 'Source: National Vital Statistics Reports, ' +
+                 'Volume 64, Number 1, January 15, 2015.', fontsize=9)
         plt.tight_layout(rect=(0, 0.03, 1, 1))
         # Create directory if OUTPUT directory does not already exist
-        output_fldr = "OUTPUT/Demographics"
+        output_fldr = 'OUTPUT/Demographics'
         output_dir = os.path.join(cur_path, output_fldr)
         if os.access(output_dir, os.F_OK) is False:
             os.makedirs(output_dir)
-        output_path = os.path.join(output_dir, "fert_rates")
+        output_path = os.path.join(output_dir, 'fert_rates')
         plt.savefig(output_path)
 
     return fert_rates
@@ -334,15 +381,15 @@ def get_mort(totpers, min_yr, max_yr, graph=False):
         plt.ylim((-0.05, 1.05))
         plt.legend(loc='upper left')
         plt.text(-5, -0.2,
-                 "Source: Actuarial Life table, 2011 Social Security " +
-                 "Administration.", fontsize=9)
+                 'Source: Actuarial Life table, 2011 Social Security ' +
+                 'Administration.', fontsize=9)
         plt.tight_layout(rect=(0, 0.03, 1, 1))
         # Create directory if OUTPUT directory does not already exist
-        output_fldr = "OUTPUT/Demographics"
+        output_fldr = 'OUTPUT/Demographics'
         output_dir = os.path.join(cur_path, output_fldr)
         if os.access(output_dir, os.F_OK) is False:
             os.makedirs(output_dir)
-        output_path = os.path.join(output_dir, "mort_rates")
+        output_path = os.path.join(output_dir, 'mort_rates')
         plt.savefig(output_path)
         # plt.show()
 
@@ -473,7 +520,7 @@ def get_imm_resid(totpers, min_yr, max_yr, graph=True):
     '''
     cur_path = os.path.split(os.path.abspath(__file__))[0]
     pop_file = utils.read_file(cur_path,
-                               "data/demographic/pop_data.csv")
+                               'data/demographic/pop_data.csv')
     pop_data = pd.read_csv(pop_file, sep=',', thousands=',')
     pop_data_samp = pop_data[(pop_data['Age'] >= min_yr - 1) &
                              (pop_data['Age'] <= max_yr - 1)]
@@ -535,11 +582,11 @@ def get_imm_resid(totpers, min_yr, max_yr, graph=True):
         plt.ylabel(r'Imm. rate $i_{s}$')
         plt.xlim((0, totpers + 1))
         # Create directory if OUTPUT directory does not already exist
-        output_fldr = "OUTPUT/Demographics"
+        output_fldr = 'OUTPUT/Demographics'
         output_dir = os.path.join(cur_path, output_fldr)
         if os.access(output_dir, os.F_OK) is False:
             os.makedirs(output_dir)
-        output_path = os.path.join(output_dir, "imm_rates_orig")
+        output_path = os.path.join(output_dir, 'imm_rates_orig')
         plt.savefig(output_path)
         # plt.show()
 
@@ -721,7 +768,7 @@ def get_pop_objs(E, S, T, min_yr, max_yr, curr_year, GraphDiag=True):
     omega_path_lev = np.zeros((E + S, T + S))
     cur_path = os.path.split(os.path.abspath(__file__))[0]
     pop_file = utils.read_file(cur_path,
-                               "data/demographic/pop_data.csv")
+                               'data/demographic/pop_data.csv')
     pop_data = pd.read_csv(pop_file, sep=',', thousands=',')
     pop_data_samp = pop_data[(pop_data['Age'] >= min_yr - 1) &
                              (pop_data['Age'] <= max_yr - 1)]
@@ -790,29 +837,29 @@ def get_pop_objs(E, S, T, min_yr, max_yr, curr_year, GraphDiag=True):
                                     (omega_path_lev[:, T] /
                                      omega_path_lev[:, T].sum())).max()
         if omegaSSmaxdif > 0.0003:
-            print("POP. WARNING: Max. abs. dist. between original SS " +
+            print('POP. WARNING: Max. abs. dist. between original SS ' +
                   "pop. dist'n and period-T pop. dist'n is greater than" +
-                  " 0.0003. It is " + str(omegaSSmaxdif) + ".")
+                  ' 0.0003. It is ' + str(omegaSSmaxdif) + '.')
         else:
-            print("POP. SUCCESS: orig. SS pop. dist is very close to " +
+            print('POP. SUCCESS: orig. SS pop. dist is very close to ' +
                   "period-T pop. dist'n. The maximum absolute " +
-                  "difference is " + str(omegaSSmaxdif) + ".")
+                  'difference is ' + str(omegaSSmaxdif) + '.')
 
         # Plot the adjusted steady-state population distribution versus
         # the original population distribution. The difference should be
         # small
         omegaSSvTmaxdiff = np.absolute(omega_SS_orig - omega_SSfx).max()
         if omegaSSvTmaxdiff > 0.0003:
-            print("POP. WARNING: The maximimum absolute difference " +
-                  "between any two corresponding points in the original"
-                  + " and adjusted steady-state population " +
-                  "distributions is" + str(omegaSSvTmaxdiff) + ", " +
-                  "which is greater than 0.0003.")
+            print('POP. WARNING: The maximimum absolute difference ' +
+                  'between any two corresponding points in the original'
+                  + ' and adjusted steady-state population ' +
+                  'distributions is' + str(omegaSSvTmaxdiff) + ', ' +
+                  'which is greater than 0.0003.')
         else:
-            print("POP. SUCCESS: The maximum absolute difference " +
-                  "between any two corresponding points in the original"
-                  + " and adjusted steady-state population " +
-                  "distributions is " + str(omegaSSvTmaxdiff))
+            print('POP. SUCCESS: The maximum absolute difference ' +
+                  'between any two corresponding points in the original'
+                  + ' and adjusted steady-state population ' +
+                  'distributions is ' + str(omegaSSvTmaxdiff))
         fig, ax = plt.subplots()
         plt.plot(age_per_EpS, omega_SS_orig, label="Original Dist'n")
         plt.plot(age_per_EpS, omega_SSfx, label="Fixed Dist'n")
@@ -836,11 +883,11 @@ def get_pop_objs(E, S, T, min_yr, max_yr, curr_year, GraphDiag=True):
         ----------------------------------------------------------------
         '''
         cur_path = os.path.split(os.path.abspath(__file__))[0]
-        output_fldr = "OUTPUT/Demographics"
+        output_fldr = 'OUTPUT/Demographics'
         output_dir = os.path.join(cur_path, output_fldr)
         if os.access(output_dir, os.F_OK) is False:
             os.makedirs(output_dir)
-        output_path = os.path.join(output_dir, "OrigVsFixSSpop")
+        output_path = os.path.join(output_dir, 'OrigVsFixSSpop')
         plt.savefig(output_path)
         plt.show()
 
@@ -849,16 +896,16 @@ def get_pop_objs(E, S, T, min_yr, max_yr, curr_year, GraphDiag=True):
         immtol_solved = \
             np.absolute(imm_diagdict['fvec'].max()) < imm_tol
         if immtol_solved:
-            print("POP. SUCCESS: Adjusted immigration rates solved " +
-                  "with maximum absolute error of " +
+            print('POP. SUCCESS: Adjusted immigration rates solved ' +
+                  'with maximum absolute error of ' +
                   str(np.absolute(imm_diagdict['fvec'].max())) +
-                  ", which is less than the tolerance of " +
+                  ', which is less than the tolerance of ' +
                   str(imm_tol))
         else:
-            print("POP. WARNING: Adjusted immigration rates did not " +
-                  "solve. Maximum absolute error of " +
+            print('POP. WARNING: Adjusted immigration rates did not ' +
+                  'solve. Maximum absolute error of ' +
                   str(np.absolute(imm_diagdict['fvec'].max())) +
-                  " is greater than the tolerance of " + str(imm_tol))
+                  ' is greater than the tolerance of ' + str(imm_tol))
 
         # Test whether the steady-state growth rates implied by the
         # adjusted OMEGA matrix equals the steady-state growth rate of
@@ -871,17 +918,17 @@ def get_pop_objs(E, S, T, min_yr, max_yr, curr_year, GraphDiag=True):
         eigvalues2, eigvectors2 = np.linalg.eig(OMEGA2)
         g_n_SS_adj = (eigvalues[np.isreal(eigvalues2)].real).max() - 1
         if np.max(np.absolute(g_n_SS_adj - g_n_SS)) > 10 ** (-8):
-            print("FAILURE: The steady-state population growth rate" +
-                  " from adjusted OMEGA is different (diff is " +
-                  str(g_n_SS_adj - g_n_SS) + ") than the steady-" +
-                  "state population growth rate from the original" +
-                  " OMEGA.")
+            print('FAILURE: The steady-state population growth rate' +
+                  ' from adjusted OMEGA is different (diff is ' +
+                  str(g_n_SS_adj - g_n_SS) + ') than the steady-' +
+                  'state population growth rate from the original' +
+                  ' OMEGA.')
         elif np.max(np.absolute(g_n_SS_adj - g_n_SS)) <= 10 ** (-8):
-            print("SUCCESS: The steady-state population growth rate" +
-                  " from adjusted OMEGA is close to (diff is " +
-                  str(g_n_SS_adj - g_n_SS) + ") the steady-" +
-                  "state population growth rate from the original" +
-                  " OMEGA.")
+            print('SUCCESS: The steady-state population growth rate' +
+                  ' from adjusted OMEGA is close to (diff is ' +
+                  str(g_n_SS_adj - g_n_SS) + ') the steady-' +
+                  'state population growth rate from the original' +
+                  ' OMEGA.')
 
         # Do another test of the adjusted immigration rates. Create the
         # new OMEGA matrix implied by the new immigration rates. Plug in
@@ -890,21 +937,21 @@ def get_pop_objs(E, S, T, min_yr, max_yr, curr_year, GraphDiag=True):
         # steady-state population distribution
         omega_new = np.dot(OMEGA2, omega_SSfx)
         omega_errs = np.absolute(omega_new - omega_SSfx)
-        print("The maximum absolute difference between the adjusted " +
-              "steady-state population distribution and the " +
-              "distribution generated by hitting the adjusted OMEGA " +
-              "transition matrix is " + str(omega_errs.max()))
+        print('The maximum absolute difference between the adjusted ' +
+              'steady-state population distribution and the ' +
+              'distribution generated by hitting the adjusted OMEGA ' +
+              'transition matrix is ' + str(omega_errs.max()))
 
         # Plot the original immigration rates versus the adjusted
         # immigration rates
         immratesmaxdiff = \
             np.absolute(imm_rates_orig - imm_rates_adj).max()
-        print("The maximum absolute distance between any two points " +
-              "of the original immigration rates and adjusted " +
-              "immigration rates is " + str(immratesmaxdiff))
+        print('The maximum absolute distance between any two points ' +
+              'of the original immigration rates and adjusted ' +
+              'immigration rates is ' + str(immratesmaxdiff))
         fig, ax = plt.subplots()
-        plt.plot(age_per_EpS, imm_rates_orig, label="Original Imm. Rates")
-        plt.plot(age_per_EpS, imm_rates_adj, label="Adj. Imm. Rates")
+        plt.plot(age_per_EpS, imm_rates_orig, label='Original Imm. Rates')
+        plt.plot(age_per_EpS, imm_rates_adj, label='Adj. Imm. Rates')
         # for the minor ticks, use no labels; default NullFormatter
         minorLocator = MultipleLocator(1)
         ax.xaxis.set_minor_locator(minorLocator)
@@ -913,28 +960,28 @@ def get_pop_objs(E, S, T, min_yr, max_yr, curr_year, GraphDiag=True):
             'Original immigration rates vs. adjusted',
             fontsize=20)
         plt.xlabel(r'Age $s$')
-        plt.ylabel(r"Imm. rates $i_{s}$")
+        plt.ylabel(r'Imm. rates $i_{s}$')
         plt.xlim((0, E + S + 1))
         plt.legend(loc='upper center')
         # Create directory if OUTPUT directory does not already exist
-        output_path = os.path.join(output_dir, "OrigVsAdjImm")
+        output_path = os.path.join(output_dir, 'OrigVsAdjImm')
         plt.savefig(output_path)
         plt.show()
 
         # Plot population distributions for data_year, curr_year,
         # curr_year+20, omega_SSfx, and omega_SS_orig
         fig, ax = plt.subplots()
-        plt.plot(age_per_EpS, pop_2013_pct, label="2013 pop.")
+        plt.plot(age_per_EpS, pop_2013_pct, label='2013 pop.')
         plt.plot(age_per_EpS, (omega_path_lev[:, 0] /
                                omega_path_lev[:, 0].sum()),
-                 label=str(curr_year) + " pop.")
+                 label=str(curr_year) + ' pop.')
         plt.plot(age_per_EpS, (omega_path_lev[:, int(0.5 * S)] /
                                omega_path_lev[:, int(0.5 * S)].sum()),
-                 label="T=" + str(int(0.5 * S)) + " pop.")
+                 label='T=' + str(int(0.5 * S)) + ' pop.')
         plt.plot(age_per_EpS, (omega_path_lev[:, int(S)] /
                                omega_path_lev[:, int(S)].sum()),
-                 label="T=" + str(int(S)) + " pop.")
-        plt.plot(age_per_EpS, omega_SSfx, label="Adj. SS pop.")
+                 label='T=' + str(int(S)) + ' pop.')
+        plt.plot(age_per_EpS, omega_SSfx, label='Adj. SS pop.')
         # for the minor ticks, use no labels; default NullFormatter
         minorLocator = MultipleLocator(1)
         ax.xaxis.set_minor_locator(minorLocator)
@@ -947,7 +994,7 @@ def get_pop_objs(E, S, T, min_yr, max_yr, curr_year, GraphDiag=True):
         plt.xlim((0, E+S+1))
         plt.legend(loc='lower left')
         # Create directory if OUTPUT directory does not already exist
-        output_path = os.path.join(output_dir, "PopDistPath")
+        output_path = os.path.join(output_dir, 'PopDistPath')
         plt.savefig(output_path)
         plt.show()
 
